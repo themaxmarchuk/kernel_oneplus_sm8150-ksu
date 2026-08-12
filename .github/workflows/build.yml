@@ -1,0 +1,114 @@
+name: Build Kernel
+
+on:
+  workflow_dispatch:
+    inputs:
+      release:
+        description: "Mark this build as a GitHub Release"
+        type: boolean
+        default: false
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CLANG_VERSION: clang-r547379
+  ARCH: arm64
+  SUBARCH: arm64
+  CROSS_COMPILE: aarch64-linux-gnu-
+  CROSS_COMPILE_ARM32: arm-linux-gnueabi-
+  KBUILD_BUILD_USER: GitHub
+  KBUILD_BUILD_HOST: Actions
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 120
+    steps:
+      - name: Checkout kernel source
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential zip bc bison flex \
+            libssl-dev libelf-dev \
+            kmod cpio rsync unzip curl \
+            device-tree-compiler \
+            gcc-aarch64-linux-gnu \
+            gcc-arm-linux-gnueabi
+
+      - name: Cache Clang toolchain
+        id: cache-clang
+        uses: actions/cache@v4
+        with:
+          path: android-clang/${{ env.CLANG_VERSION }}
+          key: ${{ env.CLANG_VERSION }}
+
+      - name: Download Clang ${{ env.CLANG_VERSION }}
+        if: steps.cache-clang.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p android-clang/${{ env.CLANG_VERSION }}
+          curl -L --fail \
+            "https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/main/${{ env.CLANG_VERSION }}.tar.gz" \
+            -o clang.tar.gz
+          tar -xzf clang.tar.gz -C android-clang/${{ env.CLANG_VERSION }}
+          rm clang.tar.gz
+
+      - name: Cache ccache
+        uses: actions/cache@v4
+        with:
+          path: ~/.ccache
+          key: ccache-${{ github.ref_name }}-${{ github.sha }}
+          restore-keys: |
+            ccache-${{ github.ref_name }}-
+            ccache-
+
+      - name: Build kernel
+        env:
+          CLANG_DIR: ${{ github.workspace }}/android-clang/${{ env.CLANG_VERSION }}/bin
+        run: |
+          set -euo pipefail
+          export PATH="$CLANG_DIR:$PATH"
+          export USE_CCACHE=1
+          export CCACHE_DIR="$HOME/.ccache"
+
+          echo "clang: $(command -v clang)"
+          clang --version
+          echo "aarch64-linux-gnu-gcc: $(command -v aarch64-linux-gnu-gcc)"
+          echo "arm-linux-gnueabi-ld: $(command -v arm-linux-gnueabi-ld)"
+
+          MAKE_ARGS="ARCH=arm64 CC=clang LD=ld.lld AR=llvm-ar NM=llvm-nm \
+            OBJCOPY=llvm-objcopy OBJDUMP=llvm-objdump STRIP=llvm-strip"
+
+          echo "::group::Setting defconfig"
+          make $MAKE_ARGS neptune_defconfig
+          echo "::endgroup::"
+
+          echo "::group::Compiling kernel"
+          make $MAKE_ARGS -j"$(nproc --all)" 2>&1 | tee "$GITHUB_WORKSPACE/build.log"
+          echo "::endgroup::"
+
+      - name: Verify output
+        run: |
+          test -f arch/arm64/boot/Image.gz-dtb || { echo "::error::Image.gz-dtb not found"; exit 1; }
+          ls -lh arch/arm64/boot/Image.gz-dtb
+
+      - name: Upload kernel artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Image.gz-dtb-${{ github.sha }}
+          path: arch/arm64/boot/Image.gz-dtb
+          if-no-files-found: error
+
+      - name: Upload build log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log-${{ github.sha }}
+          path: build.log
+          if-no-files-found: warn
