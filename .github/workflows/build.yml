@@ -37,7 +37,7 @@ jobs:
             device-tree-compiler \
             gcc-aarch64-linux-gnu \
             gcc-arm-linux-gnueabi \
-            python3 mkbootimg
+            python3
 
       - name: Cache Clang toolchain (clang-r547379)
         id: cache-clang
@@ -92,48 +92,47 @@ jobs:
 
       - name: Verify output
         run: |
-          test -f arch/arm64/boot/Image.gz-dtb || { echo "::error::Image.gz-dtb not found"; exit 1; }
-          ls -lh arch/arm64/boot/Image.gz-dtb
+          test -f arch/arm64/boot/Image || { echo "::error::Image not found"; exit 1; }
+          ls -lh arch/arm64/boot/Image
 
-      - name: Repack boot.img with new kernel
+      - name: Repack boot.img (Header v2 Stock Layout)
         run: |
+          echo "::group::Downloading AOSP mkbootimg tools"
+          git clone https://android.googlesource.com/platform/system/tools/mkbootimg
+          echo "::endgroup::"
+
           echo "::group::Downloading stock image"
           curl -L --fail "https://mirror.codebucket.de/yaap/guacamole/20260522/boot.img" -o boot.img
           echo "::endgroup::"
           
-          echo "::group::Repacking boot.img"
-          echo "Extracting ramdisk"
-          python3 - <<'EOF'
-          import struct
-          with open('boot.img', 'rb') as f:
-              data = f.read()
-          page_size = struct.unpack('<I', data[36:40])[0]
-          kernel_size = struct.unpack('<I', data[8:12])[0]
-          ramdisk_size = struct.unpack('<I', data[16:20])[0]
-          def pages(n, p): return (n + p - 1) // p
-          ramdisk_offset = page_size + pages(kernel_size, page_size) * page_size
-          with open('ramdisk.img', 'wb') as f:
-              f.write(data[ramdisk_offset:ramdisk_offset + ramdisk_size])
-          EOF
+          echo "::group::Unpacking stock boot.img"
+          mkdir -p stock_boot
+          python3 mkbootimg/unpack_bootimg.py --boot_img boot.img --out stock_boot
+          echo "::endgroup::"
 
-          echo "Creating new boot image"
-          mkbootimg \
-            --header_version 1 \
-            --kernel arch/arm64/boot/Image.gz-dtb \
-            --ramdisk ramdisk.img \
-            --base 0x00000000 --kernel_offset 0x00008000 \
-            --ramdisk_offset 0x01000000 --tags_offset 0x00000100 \
+          echo "::group::Repacking boot.img (Header v2)"
+          python3 mkbootimg/mkbootimg.py \
+            --header_version 2 \
+            --kernel arch/arm64/boot/Image \
+            --ramdisk stock_boot/ramdisk \
+            --dtb stock_boot/dtb \
             --pagesize 4096 \
-            --os_version "16.0.0" --os_patch_level "2026-05" \
+            --base 0x00000000 \
+            --kernel_offset 0x00008000 \
+            --ramdisk_offset 0x01000000 \
+            --tags_offset 0x00000100 \
+            --dtb_offset 0x01f00000 \
+            --os_version "16.0.0" \
+            --os_patch_level "2026-05" \
             --cmdline "androidboot.hardware=qcom androidboot.console=ttyMSM0 androidboot.memcg=1 lpm_levels.sleep_disabled=1 msm_rtb.filter=0x237 service_locator.enable=1 swiotlb=2048 loop.max_part=7 androidboot.usbcontroller=a600000.dwc3 kpti=off androidboot.vbmeta.avb_version=1.0 buildvariant=user" \
             --output boot-suki.img
           echo "::endgroup::"
 
-      - name: Upload kernel artifact
+      - name: Upload kernel image artifact
         uses: actions/upload-artifact@v4
         with:
-          name: Image.gz-dtb-${{ github.sha }}
-          path: arch/arm64/boot/Image.gz-dtb
+          name: Image 
+          path: arch/arm64/boot/Image
           if-no-files-found: error
 
       - name: Upload boot image artifact
